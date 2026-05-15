@@ -1,0 +1,56 @@
+# Main playbook — deploy modraw-server
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbook.yml
+#
+# First time or when DB setup is needed:
+#   ansible-playbook -i inventory/hosts.yml playbook.yml --tags setup
+#
+# Deploy app only:
+#   ansible-playbook -i inventory/hosts.yml playbook.yml --tags deploy
+
+- name: Load secrets from .env
+  hosts: localhost
+  gather_facts: no
+  connection: local
+  tags: [always]
+  tasks:
+    - name: Check .env file exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/.env"
+      register: _env_file
+
+    - name: Fail if .env file is missing
+      ansible.builtin.fail:
+        msg: |
+          Missing deploy/ansible/.env file.
+          Copy the example and fill in your secrets:
+            cp deploy/ansible/.env.example deploy/ansible/.env
+      when: not _env_file.stat.exists
+
+    - name: Parse .env to JSON
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/parse_env.py"
+          - "{{ playbook_dir }}/.env"
+      register: _env_json
+      changed_when: false
+      when: _env_file.stat.exists
+
+    - name: Store secrets as facts
+      ansible.builtin.set_fact:
+        deploy: "{{ _env_json.stdout | from_json }}"
+
+- name: Setup PostgreSQL
+  hosts: gmc-server
+  become: yes
+  tags: [setup, postgres]
+  roles:
+    - postgresql
+
+- name: Deploy modraw-server
+  hosts: gmc-server
+  become: yes
+  tags: [deploy, app]
+  roles:
+    - modraw-server

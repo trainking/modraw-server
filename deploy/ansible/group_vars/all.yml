@@ -1,0 +1,28 @@
+# Group variables — modraw-server deployment
+# Secrets (PG_PASSWORD, JWT_SECRET) come from deploy/ansible/.env
+
+# --- Server ---
+server_port: 8088
+server_domain: "gmc.example.com"
+
+# --- PostgreSQL ---
+pg_version: 14
+pg_user: modraw
+pg_database: modraw
+
+# --- modraw-server ---
+app_user: modraw
+app_group: modraw
+app_path: /opt/modraw-server
+binary_name: modraw-server
+env: release
+
+# --- JWT ---
+access_token_ttl: 15m
+refresh_token_ttl: 168h
+
+# --- CORS ---
+cors_origins: "http://{{ server_domain }},https://{{ server_domain }}"
+
+# --- WebSocket ---
+ws_max_msg_size: 4096

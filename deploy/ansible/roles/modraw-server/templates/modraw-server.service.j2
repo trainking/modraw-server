@@ -1,0 +1,29 @@
+[Unit]
+Description=modraw-server — collaborative whiteboard backend
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User={{ app_user }}
+Group={{ app_group }}
+WorkingDirectory={{ app_path }}
+EnvironmentFile={{ app_path }}/.env
+ExecStart={{ app_path }}/{{ binary_name }}
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths={{ app_path }}
+PrivateTmp=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{ binary_name }}
+
+[Install]
+WantedBy=multi-user.target
