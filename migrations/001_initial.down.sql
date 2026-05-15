@@ -1,0 +1,7 @@
+DROP TABLE IF EXISTS refresh_tokens;
+DROP TABLE IF EXISTS canvas_collaborators;
+DROP TABLE IF EXISTS share_links;
+DROP TABLE IF EXISTS libraries;
+DROP TABLE IF EXISTS canvases;
+DROP TABLE IF EXISTS folders;
+DROP TABLE IF EXISTS users;
