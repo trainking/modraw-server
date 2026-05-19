@@ -18,11 +18,11 @@ import (
 )
 
 var (
-	ErrEmailTaken       = errors.New("email already registered")
-	ErrInvalidCreds     = errors.New("invalid email or password")
-	ErrWeakPassword     = errors.New("password must be 8-72 characters")
-	ErrInvalidToken     = errors.New("invalid or expired refresh token")
-	ErrTokenRevoked     = errors.New("refresh token revoked")
+	ErrEmailTaken   = errors.New("email already registered")
+	ErrInvalidCreds = errors.New("invalid email or password")
+	ErrWeakPassword = errors.New("password must be 8-72 characters")
+	ErrInvalidToken = errors.New("invalid or expired refresh token")
+	ErrTokenRevoked = errors.New("refresh token revoked")
 )
 
 type AuthService struct {
@@ -46,8 +46,8 @@ type LoginInput struct {
 }
 
 type AuthTokens struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
+	AccessToken  string      `json:"access_token"`
+	RefreshToken string      `json:"refresh_token"`
 	User         *model.User `json:"user"`
 }
 
@@ -100,6 +100,7 @@ func (s *AuthService) Refresh(ctx context.Context, refreshTokenStr string) (*Aut
 		return nil, ErrInvalidToken
 	}
 
+	// claims.TokenID is the jti claim — matches the jti column in refresh_tokens.
 	valid, err := s.userRepo.IsRefreshTokenValid(ctx, claims.UserID, claims.TokenID)
 	if err != nil || !valid {
 		return nil, ErrTokenRevoked
@@ -138,15 +139,14 @@ func (s *AuthService) generateTokens(ctx context.Context, user *model.User) (*Au
 		return nil, fmt.Errorf("generate refresh token: %w", err)
 	}
 
+	// tokenID is the JWT jti claim — store it in the refresh_tokens.jti column
+	// so that RevokeRefreshToken and IsRefreshTokenValid can look it up.
 	tokenHash := sha256Hex(refresh)
 	expiresAt := refreshTokenExpiry(s.cfg.RefreshTTL)
 
-	dbTokenID, err := s.userRepo.SaveRefreshToken(ctx, user.ID, tokenHash, expiresAt)
-	if err != nil {
+	if err := s.userRepo.SaveRefreshToken(ctx, user.ID, tokenID, tokenHash, expiresAt); err != nil {
 		return nil, fmt.Errorf("save refresh token: %w", err)
 	}
-	_ = dbTokenID
-	_ = tokenID
 
 	return &AuthTokens{
 		AccessToken:  access,

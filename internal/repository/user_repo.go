@@ -60,24 +60,28 @@ func (r *UserRepository) UpdatePassword(ctx context.Context, id, passwordHash st
 	return err
 }
 
-func (r *UserRepository) SaveRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) (string, error) {
-	var tokenID string
-	query := `INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3) RETURNING id`
-	err := r.db.QueryRowContext(ctx, query, userID, tokenHash, expiresAt).Scan(&tokenID)
-	return tokenID, err
-}
-
-func (r *UserRepository) RevokeRefreshToken(ctx context.Context, tokenID string) error {
-	query := `UPDATE refresh_tokens SET revoked = TRUE WHERE id = $1 AND revoked = FALSE`
-	_, err := r.db.ExecContext(ctx, query, tokenID)
+// SaveRefreshToken stores a refresh token record. The jti parameter is the JWT Token ID
+// (jti claim) from the refresh token, used to look up and revoke the token later.
+func (r *UserRepository) SaveRefreshToken(ctx context.Context, userID, jti, tokenHash string, expiresAt time.Time) error {
+	query := `INSERT INTO refresh_tokens (user_id, jti, token_hash, expires_at) VALUES ($1, $2, $3, $4)`
+	_, err := r.db.ExecContext(ctx, query, userID, jti, tokenHash, expiresAt)
 	return err
 }
 
-func (r *UserRepository) IsRefreshTokenValid(ctx context.Context, userID, tokenID string) (bool, error) {
+// RevokeRefreshToken marks a refresh token as revoked by its JWT jti.
+func (r *UserRepository) RevokeRefreshToken(ctx context.Context, jti string) error {
+	query := `UPDATE refresh_tokens SET revoked = TRUE WHERE jti = $1 AND revoked = FALSE`
+	_, err := r.db.ExecContext(ctx, query, jti)
+	return err
+}
+
+// IsRefreshTokenValid checks whether a refresh token identified by jti exists,
+// is not revoked, and has not expired.
+func (r *UserRepository) IsRefreshTokenValid(ctx context.Context, userID, jti string) (bool, error) {
 	var revoked bool
 	var expiresAt time.Time
-	query := `SELECT revoked, expires_at FROM refresh_tokens WHERE id = $1 AND user_id = $2`
-	err := r.db.QueryRowContext(ctx, query, tokenID, userID).Scan(&revoked, &expiresAt)
+	query := `SELECT revoked, expires_at FROM refresh_tokens WHERE jti = $1 AND user_id = $2`
+	err := r.db.QueryRowContext(ctx, query, jti, userID).Scan(&revoked, &expiresAt)
 	if err != nil {
 		return false, err
 	}
