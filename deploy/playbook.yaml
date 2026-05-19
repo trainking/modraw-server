@@ -1,0 +1,372 @@
+---
+# modraw-server — build, package & deploy
+#
+# Secrets are passed via environment variables:
+#   PG_PASSWORD  — database password
+#   JWT_SECRET   — JWT signing key (generate: openssl rand -hex 32)
+#
+# Usage:
+#   # First-time (PostgreSQL + app):
+#   PG_PASSWORD=xxx JWT_SECRET=yyy \
+#     ansible-playbook -i 'SERVER_IP,' -u root deploy/playbook.yaml --tags setup,deploy
+#
+#   # Redeploy app only:
+#   PG_PASSWORD=xxx JWT_SECRET=yyy \
+#     ansible-playbook -i 'SERVER_IP,' -u root deploy/playbook.yaml --tags deploy
+#
+#   # Override defaults:
+#   PG_PASSWORD=xxx JWT_SECRET=yyy \
+#     ansible-playbook -i 'SERVER_IP,' -u root deploy/playbook.yaml \
+#     -e server_domain=gmc.example.com -e server_port=8080
+
+- name: Build
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [build, deploy, app]
+  vars:
+    project_root: "{{ playbook_dir }}/.."
+    output_dir: "{{ playbook_dir }}/bin"
+  tasks:
+    - name: Create output directory
+      ansible.builtin.file:
+        path: "{{ output_dir }}"
+        state: directory
+
+    - name: Build Go binary for linux/amd64
+      ansible.builtin.command:
+        cmd: go build -ldflags="-s -w" -o "{{ output_dir }}/modraw-server" ./cmd/server
+        chdir: "{{ project_root }}"
+      environment:
+        CGO_ENABLED: "0"
+        GOOS: linux
+        GOARCH: amd64
+
+- name: Deploy
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    # --- Server ---
+    server_port: 8088
+    server_domain: "{{ ansible_default_ipv4.address }}"
+
+    # --- PostgreSQL ---
+    pg_version: 14
+    pg_user: modraw
+    pg_database: modraw
+    pg_password: "{{ lookup('env', 'PG_PASSWORD') }}"
+
+    # --- App ---
+    app_user: modraw
+    app_group: modraw
+    app_path: /opt/modraw-server
+    binary_name: modraw-server
+    gin_mode: release
+
+    # --- JWT ---
+    jwt_secret: "{{ lookup('env', 'JWT_SECRET') }}"
+    access_token_ttl: 15m
+    refresh_token_ttl: 168h
+
+    # --- CORS / WS ---
+    cors_origins: "*"
+    ws_max_msg_size: 4096
+
+  tasks:
+    # ============================================================
+    # PostgreSQL setup (tag: setup, postgres)
+    # ============================================================
+    - name: Install PostgreSQL prerequisites
+      ansible.builtin.apt:
+        name: [gnupg, wget, ca-certificates]
+        state: present
+        update_cache: true
+      tags: [setup, postgres]
+
+    - name: Add PostgreSQL APT repository key
+      ansible.builtin.apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        state: present
+      tags: [setup, postgres]
+
+    - name: Add PostgreSQL APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+        state: present
+        update_cache: true
+      tags: [setup, postgres]
+
+    - name: Install PostgreSQL
+      ansible.builtin.apt:
+        name:
+          - "postgresql-{{ pg_version }}"
+          - "postgresql-client-{{ pg_version }}"
+          - python3-psycopg2
+        state: present
+      tags: [setup, postgres]
+
+    - name: Ensure PostgreSQL is running
+      ansible.builtin.systemd:
+        name: postgresql
+        state: started
+        enabled: true
+      tags: [setup, postgres]
+
+    - name: Wait for PostgreSQL socket
+      ansible.builtin.wait_for:
+        path: /var/run/postgresql/.s.PGSQL.5432
+        state: present
+        timeout: 10
+      tags: [setup, postgres]
+
+    - name: Create database user
+      become: true
+      become_user: postgres
+      community.postgresql.postgresql_user:
+        name: "{{ pg_user }}"
+        password: "{{ pg_password }}"
+        encrypted: true
+        state: present
+      tags: [setup, postgres]
+
+    - name: Create database
+      become: true
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: "{{ pg_database }}"
+        owner: "{{ pg_user }}"
+        encoding: UTF-8
+        state: present
+      tags: [setup, postgres]
+
+    - name: Enable uuid-ossp extension
+      become: true
+      become_user: postgres
+      community.postgresql.postgresql_ext:
+        name: uuid-ossp
+        db: "{{ pg_database }}"
+        state: present
+      tags: [setup, postgres]
+
+    - name: Grant schema permissions
+      become: true
+      become_user: postgres
+      community.postgresql.postgresql_privs:
+        db: "{{ pg_database }}"
+        privs: ALL
+        type: schema
+        obj: public
+        role: "{{ pg_user }}"
+      tags: [setup, postgres]
+
+    # ============================================================
+    # App deployment (tag: deploy, app)
+    # ============================================================
+    - name: Create app system group
+      ansible.builtin.group:
+        name: "{{ app_group }}"
+        system: true
+      tags: [deploy, app]
+
+    - name: Create app system user
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        group: "{{ app_group }}"
+        system: true
+        create_home: false
+        shell: /usr/sbin/nologin
+      tags: [deploy, app]
+
+    - name: Create app directory
+      ansible.builtin.file:
+        path: "{{ app_path }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+      tags: [deploy, app]
+
+    - name: Create migrations directory
+      ansible.builtin.file:
+        path: "{{ app_path }}/migrations"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+      tags: [deploy, app]
+
+    - name: Upload binary
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/bin/modraw-server"
+        dest: "{{ app_path }}/modraw-server"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+      tags: [deploy, app]
+      notify: Restart modraw-server
+
+    - name: Upload migrations
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../migrations/"
+        dest: "{{ app_path }}/migrations"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0644"
+      tags: [deploy, app]
+
+    - name: Deploy environment file
+      ansible.builtin.copy:
+        dest: "{{ app_path }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0640"
+        content: |
+          PORT=:{{ server_port }}
+          DATABASE_URL=postgres://{{ pg_user }}:{{ pg_password | urlencode }}@localhost:5432/{{ pg_database }}?sslmode=disable
+          JWT_SECRET={{ jwt_secret }}
+          ACCESS_TOKEN_TTL={{ access_token_ttl }}
+          REFRESH_TOKEN_TTL={{ refresh_token_ttl }}
+          CORS_ORIGINS={{ cors_origins }}
+          WS_MAX_MSG_SIZE={{ ws_max_msg_size }}
+          GIN_MODE={{ gin_mode }}
+      tags: [deploy, app]
+      notify: Restart modraw-server
+
+    - name: Deploy systemd service unit
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/modraw-server.service"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=modraw-server — collaborative whiteboard backend
+          After=network.target postgresql.service
+          Requires=postgresql.service
+
+          [Service]
+          Type=simple
+          User={{ app_user }}
+          Group={{ app_group }}
+          WorkingDirectory={{ app_path }}
+          EnvironmentFile={{ app_path }}/.env
+          ExecStart={{ app_path }}/modraw-server
+          Restart=on-failure
+          RestartSec=5s
+
+          NoNewPrivileges=yes
+          ProtectSystem=strict
+          ProtectHome=yes
+          ReadWritePaths={{ app_path }}
+          PrivateTmp=yes
+
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=modraw-server
+
+          [Install]
+          WantedBy=multi-user.target
+      tags: [deploy, app]
+      notify: Restart modraw-server
+
+    - name: Ensure service is running
+      ansible.builtin.systemd:
+        name: modraw-server
+        state: started
+        enabled: true
+        daemon_reload: true
+      tags: [deploy, app]
+
+    # --- Nginx ---
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+      tags: [deploy, app]
+
+    - name: Deploy Nginx config
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/modraw-server
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          upstream modraw_backend {
+              server 127.0.0.1:{{ server_port }};
+              keepalive 64;
+          }
+
+          server {
+              listen 80 default_server;
+              server_name {{ server_domain }};
+
+              client_max_body_size 10m;
+              client_body_timeout 60s;
+
+              location / {
+                  proxy_pass http://modraw_backend;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_read_timeout 30s;
+                  proxy_connect_timeout 5s;
+              }
+
+              location /ws {
+                  proxy_pass http://modraw_backend;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_read_timeout 86400s;
+                  proxy_connect_timeout 5s;
+                  proxy_buffering off;
+              }
+
+              location /health {
+                  proxy_pass http://modraw_backend;
+                  proxy_http_version 1.1;
+              }
+          }
+      tags: [deploy, app]
+      notify: Reload Nginx
+
+    - name: Enable Nginx site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/modraw-server
+        dest: /etc/nginx/sites-enabled/modraw-server
+        state: link
+      tags: [deploy, app]
+      notify: Reload Nginx
+
+    - name: Remove default Nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      tags: [deploy, app]
+      notify: Reload Nginx
+
+    - name: Ensure Nginx is running
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: true
+      tags: [deploy, app]
+
+  handlers:
+    - name: Restart modraw-server
+      ansible.builtin.systemd:
+        name: modraw-server
+        state: restarted
+        daemon_reload: true
+
+    - name: Reload Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded

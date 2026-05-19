@@ -13,9 +13,10 @@ func CORS(cfg *config.Config) gin.HandlerFunc {
 		origin := c.Request.Header.Get("Origin")
 
 		allowOrigin := ""
+		allowAny := false
 		for _, allowed := range cfg.CORSOrigins {
 			if allowed == "*" {
-				allowOrigin = "*"
+				allowAny = true
 				break
 			}
 			if allowed == origin {
@@ -23,7 +24,15 @@ func CORS(cfg *config.Config) gin.HandlerFunc {
 				break
 			}
 		}
-		if allowOrigin == "" && len(cfg.CORSOrigins) > 0 {
+
+		if allowAny {
+			// Reflect the request origin to support credentials
+			if origin != "" {
+				allowOrigin = origin
+			} else {
+				allowOrigin = "*"
+			}
+		} else if allowOrigin == "" && len(cfg.CORSOrigins) > 0 {
 			allowOrigin = cfg.CORSOrigins[0]
 		}
 
